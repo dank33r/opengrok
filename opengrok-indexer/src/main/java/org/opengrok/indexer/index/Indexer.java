@@ -19,22 +19,26 @@
 
 /*
  * Copyright (c) 2005, 2020, Oracle and/or its affiliates. All rights reserved.
- * Portions Copyright 2011 Jens Elkner.
- * Portions Copyright (c) 2017-2020, Chris Fraire <cfraire@me.com>.
+ * Portions Copyright (c) 2011, Jens Elkner.
+ * Portions Copyright (c) 2017, 2020, Chris Fraire <cfraire@me.com>.
  */
 package org.opengrok.indexer.index;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -50,7 +54,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+
 import org.opengrok.indexer.Info;
+import org.opengrok.indexer.Metrics;
 import org.opengrok.indexer.analysis.AnalyzerGuru;
 import org.opengrok.indexer.analysis.AnalyzerGuruHelp;
 import org.opengrok.indexer.analysis.Ctags;
@@ -148,7 +154,7 @@ public final class Indexer {
         boolean update = true;
 
         Executor.registerErrorHandler();
-        ArrayList<String> subFiles = new ArrayList<>();
+        List<String> subFiles = RuntimeEnvironment.getInstance().getSubFiles();
         ArrayList<String> subFilesList = new ArrayList<>();
 
         boolean createDict = false;
@@ -177,6 +183,7 @@ public final class Indexer {
             }
 
             env = RuntimeEnvironment.getInstance();
+            env.setIndexer(true);
 
             // Complete the configuration of repository types.
             List<Class<? extends Repository>> repositoryClasses
@@ -316,6 +323,8 @@ public final class Indexer {
                 System.exit(1);
             }
 
+            Metrics.updateSubFiles(subFiles);
+
             // If the webapp is running with a config that does not contain
             // 'projectsEnabled' property (case of upgrade or transition
             // from project-less config to one with projects), set the property
@@ -385,7 +394,7 @@ public final class Indexer {
             System.err.println("Exception: " + e.getLocalizedMessage());
             System.exit(1);
         } finally {
-            stats.report(LOGGER);
+            stats.report(LOGGER, "Indexer finished", "indexer.total");
         }
     }
 
@@ -706,19 +715,24 @@ public final class Indexer {
                 "with lots of renamed files. Default is off.").execute(v ->
                     cfg.setHandleHistoryOfRenamedFiles((Boolean) v));
 
-            parser.on("--repository", "=path/to/repository",
+            parser.on("--repository", "=[path/to/repository|@file_with_paths]",
                     "Path (relative to the source root) to a repository for generating",
                     "history (if -H,--history is on). By default all discovered repositories",
                     "are history-eligible; using --repository limits to only those specified.",
-                    "Option may be repeated.").execute(v -> repositories.add((String) v));
+                    "File containing paths can be specified via @path syntax.",
+                    "Option may be repeated.")
+                .execute(v -> handlePathParameter(repositories, ((String) v).trim()));
 
-            parser.on("-S", "--search", "=[path/to/repository]",
+            parser.on("-S", "--search", "=[path/to/repository|@file_with_paths]",
                     "Search for source repositories under -s,--source, and add them. Path",
-                    "(relative to the source root) is optional. Option may be repeated.").execute(v -> {
+                    "(relative to the source root) is optional. ",
+                    "File containing paths can be specified via @path syntax.",
+                    "Option may be repeated.")
+                .execute(v -> {
                         searchRepositories = true;
-                        String repoPath = (String) v;
-                        if (!repoPath.isEmpty()) {
-                            searchPaths.add(repoPath);
+                        String value = ((String) v).trim();
+                        if (!value.isEmpty()) {
+                            handlePathParameter(searchPaths, value);
                         }
                     });
 
@@ -743,7 +757,8 @@ public final class Indexer {
                     cfg.setWebappLAF((String) stylePath));
 
             parser.on("-T", "--threads", "=number", Integer.class,
-                    "The number of threads to use for index generation and repository scan.",
+                    "The number of threads to use for index generation, repository scan",
+                    "and repository invalidation.",
                     "By default the number of threads will be set to the number of available",
                     "CPUs. This influences the number of spawned ctags processes as well.").
                     execute(threadCount -> cfg.setIndexingParallelism((Integer) threadCount));
@@ -990,7 +1005,7 @@ public final class Indexer {
             Statistics stats = new Statistics();
             env.setRepositories(searchPaths.toArray(new String[0]));
             stats.report(LOGGER, String.format("Done scanning for repositories, found %d repositories",
-                    env.getRepositories().size()));
+                    env.getRepositories().size()), "indexer.repository.scan");
         }
 
         if (createHistoryCache) {
@@ -1102,7 +1117,7 @@ public final class Indexer {
             LOGGER.log(Level.WARNING, "Received interrupt while waiting" +
                     " for executor to finish", exp);
         }
-        elapsed.report(LOGGER, "Done indexing data of all repositories");
+        elapsed.report(LOGGER, "Done indexing data of all repositories", "indexer.repository.indexing");
 
         CtagsUtil.deleteTempFiles();
     }
@@ -1135,6 +1150,24 @@ public final class Indexer {
 
         if (in.equals("n")) {
             System.exit(1);
+        }
+    }
+
+    // Visible for testing
+    static void handlePathParameter(Collection<String> paramValueStore, String pathValue) {
+        if (pathValue.startsWith("@")) {
+            paramValueStore.addAll(loadPathsFromFile(pathValue.substring(1)));
+        } else {
+            paramValueStore.add(pathValue);
+        }
+    }
+
+    private static List<String> loadPathsFromFile(String filename) {
+        try {
+            return Files.readAllLines(Path.of(filename));
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, String.format("Could not load paths from %s", filename), e);
+            throw new UncheckedIOException(e);
         }
     }
 

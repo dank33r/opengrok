@@ -18,11 +18,10 @@
  */
 
 /*
- * Copyright (c) 2018, 2019 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
  */
 package org.opengrok.suggest;
 
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.apache.commons.lang3.time.DurationFormatUtils;
@@ -72,7 +71,7 @@ public final class Suggester implements Closeable {
 
     private static final String PROJECTS_DISABLED_KEY = "";
 
-    private static final Logger logger = Logger.getLogger(Suggester.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(Suggester.class.getName());
 
     private final Map<String, SuggesterProjectData> projectData = new ConcurrentHashMap<>();
 
@@ -95,12 +94,12 @@ public final class Suggester implements Closeable {
     private final int rebuildParallelismLevel;
 
     private volatile boolean rebuilding;
+    private volatile boolean terminating;
     private final Lock rebuildLock = new ReentrantLock();
     private final Condition rebuildDone = rebuildLock.newCondition();
 
     private final CountDownLatch initDone = new CountDownLatch(1);
 
-    private final Counter suggesterRebuildCounter;
     private final Timer suggesterRebuildTimer;
     private final Timer suggesterInitTimer;
 
@@ -152,9 +151,6 @@ public final class Suggester implements Closeable {
         this.timeThreshold = timeThreshold;
         this.rebuildParallelismLevel = rebuildParallelismLevel;
 
-        suggesterRebuildCounter = Counter.builder("suggester.rebuild").
-                description("suggester rebuild count").
-                register(registry);
         suggesterRebuildTimer = Timer.builder("suggester.rebuild.latency").
                 description("suggester rebuild latency").
                 register(registry);
@@ -169,7 +165,7 @@ public final class Suggester implements Closeable {
      */
     public void init(final Collection<NamedIndexDir> luceneIndexes) {
         if (luceneIndexes == null || luceneIndexes.isEmpty()) {
-            logger.log(Level.INFO, "No index directories found, exiting...");
+            LOGGER.log(Level.INFO, "No index directories found, exiting...");
             return;
         }
         if (!projectsEnabled && luceneIndexes.size() > 1) {
@@ -178,17 +174,20 @@ public final class Suggester implements Closeable {
 
         synchronized (lock) {
             Instant start = Instant.now();
-            logger.log(Level.INFO, "Initializing suggester");
+            LOGGER.log(Level.INFO, "Initializing suggester");
 
             ExecutorService executor = Executors.newWorkStealingPool(rebuildParallelismLevel);
 
             for (NamedIndexDir indexDir : luceneIndexes) {
+                if (terminating) {
+                    LOGGER.log(Level.INFO, "Terminating suggester initialization");
+                    return;
+                }
                 submitInitIfIndexExists(executor, indexDir);
             }
 
-            Duration duration = Duration.between(start, Instant.now());
-            suggesterInitTimer.record(duration);
-            shutdownAndAwaitTermination(executor, duration, "Suggester successfully initialized");
+            shutdownAndAwaitTermination(executor, start, suggesterInitTimer,
+                    "Suggester successfully initialized");
             initDone.countDown();
         }
     }
@@ -208,18 +207,22 @@ public final class Suggester implements Closeable {
             if (indexExists(indexDir.path)) {
                 executorService.submit(getInitRunnable(indexDir));
             } else {
-                logger.log(Level.FINE, "Index in {0} directory does not exist, skipping...", indexDir);
+                LOGGER.log(Level.FINE, "Index in {0} directory does not exist, skipping...", indexDir);
             }
         } catch (IOException e) {
-            logger.log(Level.WARNING, "Could not check if index exists", e);
+            LOGGER.log(Level.WARNING, "Could not check if index exists", e);
         }
     }
 
     private Runnable getInitRunnable(final NamedIndexDir indexDir) {
         return () -> {
             try {
+                if (terminating) {
+                    return;
+                }
+
                 Instant start = Instant.now();
-                logger.log(Level.FINE, "Initializing {0}", indexDir);
+                LOGGER.log(Level.FINE, "Initializing {0}", indexDir);
 
                 SuggesterProjectData wfst = new SuggesterProjectData(FSDirectory.open(indexDir.path),
                         getSuggesterDir(indexDir.name), allowMostPopular, allowedFields);
@@ -231,9 +234,9 @@ public final class Suggester implements Closeable {
                 }
 
                 Duration d = Duration.between(start, Instant.now());
-                logger.log(Level.FINE, "Finished initialization of {0}, took {1}", new Object[] {indexDir, d});
+                LOGGER.log(Level.FINE, "Finished initialization of {0}, took {1}", new Object[] {indexDir, d});
             } catch (Exception e) {
-                logger.log(Level.SEVERE, "Could not initialize suggester data for " + indexDir, e);
+                LOGGER.log(Level.SEVERE, "Could not initialize suggester data for " + indexDir, e);
             }
         };
     }
@@ -252,15 +255,19 @@ public final class Suggester implements Closeable {
         }
     }
 
-    private void shutdownAndAwaitTermination(final ExecutorService executorService, Duration duration, final String logMessageOnSuccess) {
+    private void shutdownAndAwaitTermination(final ExecutorService executorService, Instant start,
+                                             Timer timer,
+                                             final String logMessageOnSuccess) {
         executorService.shutdown();
         try {
             executorService.awaitTermination(awaitTerminationTime.toMillis(), TimeUnit.MILLISECONDS);
-            logger.log(Level.INFO, "{0} (took {1})", new Object[]{logMessageOnSuccess,
+            Duration duration = Duration.between(start, Instant.now());
+            timer.record(duration);
+            LOGGER.log(Level.INFO, "{0} (took {1})", new Object[]{logMessageOnSuccess,
                     DurationFormatUtils.formatDurationWords(duration.toMillis(),
                             true, true)});
         } catch (InterruptedException e) {
-            logger.log(Level.SEVERE, "Interrupted while building suggesters", e);
+            LOGGER.log(Level.SEVERE, "Interrupted while building suggesters", e);
             Thread.currentThread().interrupt();
         }
     }
@@ -271,7 +278,7 @@ public final class Suggester implements Closeable {
      */
     public void rebuild(final Collection<NamedIndexDir> indexDirs) {
         if (indexDirs == null || indexDirs.isEmpty()) {
-            logger.log(Level.INFO, "Not rebuilding suggester data because no index directories were specified");
+            LOGGER.log(Level.INFO, "Not rebuilding suggester data because no index directories were specified");
             return;
         }
 
@@ -280,9 +287,12 @@ public final class Suggester implements Closeable {
         rebuildLock.unlock();
 
         synchronized (lock) {
+            if (terminating) {
+                return;
+            }
+
             Instant start = Instant.now();
-            suggesterRebuildCounter.increment();
-            logger.log(Level.INFO, "Rebuilding the following suggesters: {0}", indexDirs);
+            LOGGER.log(Level.INFO, "Rebuilding the following suggesters: {0}", indexDirs);
 
             ExecutorService executor = Executors.newWorkStealingPool(rebuildParallelismLevel);
 
@@ -295,9 +305,8 @@ public final class Suggester implements Closeable {
                 }
             }
 
-            Duration duration = Duration.between(start, Instant.now());
-            suggesterRebuildTimer.record(duration);
-            shutdownAndAwaitTermination(executor, duration, "Suggesters for " + indexDirs + " were successfully rebuilt");
+            shutdownAndAwaitTermination(executor, start, suggesterRebuildTimer,
+                    "Suggesters for " + indexDirs + " were successfully rebuilt");
         }
 
         rebuildLock.lock();
@@ -329,14 +338,18 @@ public final class Suggester implements Closeable {
     private Runnable getRebuildRunnable(final SuggesterProjectData data) {
         return () -> {
             try {
+                if (terminating) {
+                    return;
+                }
+
                 Instant start = Instant.now();
-                logger.log(Level.FINE, "Rebuilding {0}", data);
+                LOGGER.log(Level.FINE, "Rebuilding {0}", data);
                 data.rebuild();
 
                 Duration d = Duration.between(start, Instant.now());
-                logger.log(Level.FINE, "Rebuild of {0} finished, took {1}", new Object[] {data, d});
+                LOGGER.log(Level.FINE, "Rebuild of {0} finished, took {1}", new Object[] {data, d});
             } catch (Exception e) {
-                logger.log(Level.SEVERE, "Could not rebuild suggester", e);
+                LOGGER.log(Level.SEVERE, "Could not rebuild suggester", e);
             }
         };
     }
@@ -351,12 +364,12 @@ public final class Suggester implements Closeable {
         }
 
         synchronized (lock) {
-            logger.log(Level.INFO, "Removing following suggesters: {0}", names);
+            LOGGER.log(Level.INFO, "Removing following suggesters: {0}", names);
 
             for (String suggesterName : names) {
                 SuggesterProjectData collection = projectData.get(suggesterName);
                 if (collection == null) {
-                    logger.log(Level.WARNING, "Unknown suggester {0}", suggesterName);
+                    LOGGER.log(Level.WARNING, "Unknown suggester {0}", suggesterName);
                     continue;
                 }
                 collection.remove();
@@ -407,7 +420,7 @@ public final class Suggester implements Closeable {
         List<LookupResultItem> results = readers.parallelStream().flatMap(namedIndexReader -> {
             SuggesterProjectData data = projectData.get(namedIndexReader.name);
             if (data == null) {
-                logger.log(Level.FINE, "{0} not yet initialized", namedIndexReader.name);
+                LOGGER.log(Level.FINE, "{0} not yet initialized", namedIndexReader.name);
                 partialResult.value = true;
                 return Stream.empty();
             }
@@ -446,7 +459,7 @@ public final class Suggester implements Closeable {
         try {
             futures = executorService.invokeAll(searchTasks, timeThreshold, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
-            logger.log(Level.WARNING, "Interrupted while invoking suggester search", e);
+            LOGGER.log(Level.WARNING, "Interrupted while invoking suggester search", e);
             Thread.currentThread().interrupt();
             return new Suggestions(Collections.emptyList(), true);
         }
@@ -465,7 +478,7 @@ public final class Suggester implements Closeable {
                         try {
                             searchTask.wait();
                         } catch (InterruptedException e) {
-                            logger.log(Level.WARNING, "Interrupted while waiting for task: {0}", searchTask);
+                            LOGGER.log(Level.WARNING, "Interrupted while waiting for task: {0}", searchTask);
                             Thread.currentThread().interrupt();
                         }
                     }
@@ -505,7 +518,7 @@ public final class Suggester implements Closeable {
                 }
             }
         } catch (Exception e) {
-            logger.log(Level.FINE,
+            LOGGER.log(Level.FINE,
                     String.format("Could not update search count map%s",
                             projectsEnabled ? " for projects: " + projects : ""), e);
         }
@@ -554,7 +567,7 @@ public final class Suggester implements Closeable {
         }
 
         if (data == null) {
-            logger.log(Level.WARNING, "Cannot update search count because of missing suggester data{}",
+            LOGGER.log(Level.WARNING, "Cannot update search count because of missing suggester data{}",
                     projectsEnabled ? " for project " + project : "");
             return false;
         }
@@ -578,7 +591,7 @@ public final class Suggester implements Closeable {
     ) {
         SuggesterProjectData data = projectData.get(project);
         if (data == null) {
-            logger.log(Level.FINE, "Cannot retrieve search counts because suggester data for project {0} was not found",
+            LOGGER.log(Level.FINE, "Cannot retrieve search counts because suggester data for project {0} was not found",
                     project);
             return Collections.emptyList();
         }
@@ -592,11 +605,12 @@ public final class Suggester implements Closeable {
     @Override
     public void close() {
         executorService.shutdownNow();
+        terminating = true;
         projectData.values().forEach(f -> {
             try {
                 f.close();
             } catch (IOException e) {
-                logger.log(Level.WARNING, "Could not close suggester data " + f, e);
+                LOGGER.log(Level.WARNING, "Could not close suggester data " + f, e);
             }
         });
     }
@@ -630,7 +644,7 @@ public final class Suggester implements Closeable {
 
                 SuggesterProjectData data = projectData.get(namedIndexReader.name);
                 if (data == null) {
-                    logger.log(Level.FINE, "{0} not yet initialized", namedIndexReader.name);
+                    LOGGER.log(Level.FINE, "{0} not yet initialized", namedIndexReader.name);
                     return null;
                 }
                 boolean gotLock = data.tryLock();

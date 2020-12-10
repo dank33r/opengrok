@@ -21,31 +21,32 @@
 
 #
 # Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
+# Portions Copyright (c) 2020, Krystof Tulinger <k.tulinger@seznam.cz>
 #
 
-
-import tempfile
 import os
 import stat
-from git import Repo
-import pytest
-import sys
-from mockito import verify, patch, spy2, mock, ANY
-import requests
+import tempfile
 
-from opengrok_tools.scm.repofactory import get_repository
+import pytest
+import requests
+from mockito import verify, patch, spy2, mock, ANY, when
+
+import opengrok_tools.mirror
+from conftest import posix_only, system_binary
+from opengrok_tools.scm import Repository
 from opengrok_tools.scm.git import GitRepository
+from opengrok_tools.scm.repository import RepositoryException
+from opengrok_tools.utils.command import Command
+from opengrok_tools.utils.exitvals import (
+    CONTINUE_EXITVAL, FAILURE_EXITVAL
+)
 from opengrok_tools.utils.mirror import check_project_configuration, \
     check_configuration, mirror_project, run_command, get_repos_for_project, \
     HOOKS_PROPERTY, PROXY_PROPERTY, IGNORED_REPOS_PROPERTY, \
     PROJECTS_PROPERTY, DISABLED_CMD_PROPERTY, DISABLED_PROPERTY, \
     CMD_TIMEOUT_PROPERTY, HOOK_TIMEOUT_PROPERTY, DISABLED_REASON_PROPERTY
-import opengrok_tools.mirror
-from opengrok_tools.utils.exitvals import (
-    CONTINUE_EXITVAL, FAILURE_EXITVAL
-)
 from opengrok_tools.utils.patterns import COMMAND_PROPERTY, PROJECT_SUBST
-from opengrok_tools.utils.command import Command
 
 
 def test_empty_project_configuration():
@@ -94,7 +95,7 @@ def test_invalid_project_config_hooknames():
         assert not check_project_configuration(config, hookdir=tmpdir)
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_invalid_project_config_nonexec_hook():
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "foo.sh"), 'w+') as tmpfile:
@@ -103,7 +104,7 @@ def test_invalid_project_config_nonexec_hook():
             assert not check_project_configuration(config, hookdir=tmpdir)
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_valid_project_config_hook():
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "foo.sh"), 'w+') as tmpfile:
@@ -119,68 +120,10 @@ def test_invalid_config_option():
 
 
 def test_valid_config():
-    assert check_configuration({PROJECTS_PROPERTY:
-                                {"foo": {PROXY_PROPERTY: True}},
-                                PROXY_PROPERTY: "proxy"})
-
-
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
-def test_incoming_retval(monkeypatch):
-    """
-    Test that the special CONTINUE_EXITVAL value bubbles all the way up to
-    the mirror.py return value.
-    """
-
-    class MockResponse:
-
-        # mock json() method always returns a specific testing dictionary
-        @staticmethod
-        def json():
-            return "true"
-
-        @staticmethod
-        def raise_for_status():
-            pass
-
-    with tempfile.TemporaryDirectory() as source_root:
-        repo_name = "parent_repo"
-        repo_path = os.path.join(source_root, repo_name)
-        cloned_repo_name = "cloned_repo"
-        cloned_repo_path = os.path.join(source_root, cloned_repo_name)
-        project_name = "foo"    # does not matter for this test
-
-        os.mkdir(repo_path)
-
-        def mock_get_repos(*args, **kwargs):
-            return [get_repository(cloned_repo_path,
-                                   "git", project_name)]
-
-        def mock_get(*args, **kwargs):
-            return MockResponse()
-
-        # Clone a Git repository so that it can pull.
-        repo = Repo.init(repo_path)
-        new_file_path = os.path.join(repo_path, 'foo')
-        with open(new_file_path, 'w'):
-            pass
-        assert os.path.isfile(new_file_path)
-        index = repo.index
-        index.add([new_file_path])
-        index.commit("add file")
-        repo.clone(cloned_repo_path)
-
-        with monkeypatch.context() as m:
-            m.setattr(sys, 'argv', ['prog', "-I", project_name])
-
-            # With mocking done via pytest it is necessary to patch
-            # the call-site rather than the absolute object path.
-            m.setattr("opengrok_tools.mirror.get_config_value",
-                      lambda x, y, z: source_root)
-            m.setattr("opengrok_tools.utils.mirror.get_repos_for_project",
-                      mock_get_repos)
-            m.setattr("opengrok_tools.utils.mirror.do_api_call", mock_get)
-
-            assert opengrok_tools.mirror.main() == CONTINUE_EXITVAL
+    assert check_configuration({
+        PROJECTS_PROPERTY: {"foo": {PROXY_PROPERTY: True}},
+        PROXY_PROPERTY: "proxy"
+    })
 
 
 def test_empty_project_config():
@@ -195,11 +138,16 @@ def test_disabled_command_api():
     with patch(opengrok_tools.utils.mirror.call_rest_api,
                lambda a, b, c: mock(spec=requests.Response)):
         project_name = "foo"
-        config = {DISABLED_CMD_PROPERTY:
-                  {COMMAND_PROPERTY:
-                   ["http://localhost:8080/source/api/v1/foo",
-                    "POST", "data"]},
-                  PROJECTS_PROPERTY: {project_name: {DISABLED_PROPERTY: True}}}
+        config = {
+            DISABLED_CMD_PROPERTY: {
+                COMMAND_PROPERTY: [
+                    "http://localhost:8080/source/api/v1/foo",
+                    "POST", "data"]
+            },
+            PROJECTS_PROPERTY: {
+                project_name: {DISABLED_PROPERTY: True}
+            }
+        }
 
         assert mirror_project(config, project_name, False,
                               None, None) == CONTINUE_EXITVAL
@@ -236,14 +184,19 @@ def test_disabled_command_api_text_append(monkeypatch):
         data = {'messageLevel': 'info', 'duration': 'PT5M',
                 'tags': ['%PROJECT%'],
                 'text': 'disabled project'}
-        config = {DISABLED_CMD_PROPERTY:
-                  {COMMAND_PROPERTY:
-                   ["http://localhost:8080/source/api/v1/foo",
-                    "POST", data]},
-                  PROJECTS_PROPERTY: {project_name:
-                                      {DISABLED_REASON_PROPERTY:
-                                       text_to_append,
-                                       DISABLED_PROPERTY: True}}}
+        config = {
+            DISABLED_CMD_PROPERTY: {
+                COMMAND_PROPERTY: [
+                    "http://localhost:8080/source/api/v1/foo",
+                    "POST", data]
+            },
+            PROJECTS_PROPERTY: {
+                project_name: {
+                    DISABLED_REASON_PROPERTY: text_to_append,
+                    DISABLED_PROPERTY: True
+                }
+            }
+        }
 
         mirror_project(config, project_name, False, None, None)
 
@@ -254,9 +207,14 @@ def test_disabled_command_run():
     """
     spy2(opengrok_tools.utils.mirror.run_command)
     project_name = "foo"
-    config = {DISABLED_CMD_PROPERTY:
-              {COMMAND_PROPERTY: ["cat"]},
-              PROJECTS_PROPERTY: {project_name: {DISABLED_PROPERTY: True}}}
+    config = {
+        DISABLED_CMD_PROPERTY: {
+            COMMAND_PROPERTY: ["cat"]
+        },
+        PROJECTS_PROPERTY: {
+            project_name: {DISABLED_PROPERTY: True}
+        }
+    }
 
     assert mirror_project(config, project_name, False,
                           None, None) == CONTINUE_EXITVAL
@@ -294,7 +252,6 @@ def test_mirror_project_timeout(monkeypatch):
 
     def mock_process_hook(hook_ident, hook, source_root, project_name_arg,
                           proxy, hook_timeout_arg):
-
         assert hook_timeout_arg == hook_timeout
 
         # We want to terminate mirror_project() once this function runs.
@@ -319,15 +276,21 @@ def test_mirror_project_timeout(monkeypatch):
 
         project_name = "foo"
         # override testing
-        global_config_1 = {PROJECTS_PROPERTY:
-                           {project_name:
-                            {CMD_TIMEOUT_PROPERTY: cmd_timeout,
-                             HOOK_TIMEOUT_PROPERTY: hook_timeout}},
-                           CMD_TIMEOUT_PROPERTY: cmd_timeout * 2,
-                           HOOK_TIMEOUT_PROPERTY: hook_timeout * 2}
+        global_config_1 = {
+            PROJECTS_PROPERTY: {
+                project_name: {
+                    CMD_TIMEOUT_PROPERTY: cmd_timeout,
+                    HOOK_TIMEOUT_PROPERTY: hook_timeout
+                }
+            },
+            CMD_TIMEOUT_PROPERTY: cmd_timeout * 2,
+            HOOK_TIMEOUT_PROPERTY: hook_timeout * 2
+        }
         # inheritance testing
-        global_config_2 = {CMD_TIMEOUT_PROPERTY: cmd_timeout,
-                           HOOK_TIMEOUT_PROPERTY: hook_timeout}
+        global_config_2 = {
+            CMD_TIMEOUT_PROPERTY: cmd_timeout,
+            HOOK_TIMEOUT_PROPERTY: hook_timeout
+        }
 
         test_mirror_project(global_config_1)
         test_mirror_project(global_config_2)
@@ -376,3 +339,108 @@ def test_get_repos_for_project(monkeypatch):
             repos = get_repos_for_project(project_name, None, source_root,
                                           ignored_repos=['.'])
             assert len(repos) == 0
+
+
+DEFAULT_COMMAND = 'default-command'
+
+
+@pytest.mark.parametrize(['expected_command', 'config'], [
+    (DEFAULT_COMMAND, None),
+    ('/usr/bin/git', '/usr/bin/git'),
+    (DEFAULT_COMMAND, {}),
+    (DEFAULT_COMMAND, {'incoming': '/bin/false'}),
+    (DEFAULT_COMMAND, []),
+    ('/usr/local/bin/git', {'command': '/usr/local/bin/git'}),
+    (
+            '/usr/local/bin/git',
+            {'command': '/usr/local/bin/git', 'incoming': '/bin/false'}
+    )
+])
+def test_mirroring_custom_repository_command(expected_command, config):
+    assert expected_command == Repository._repository_command(config, lambda: DEFAULT_COMMAND)
+
+
+@system_binary('touch')
+def test_mirroring_custom_incoming_invoke_command(touch_binary):
+    checking_file = 'incoming.txt'
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'incoming': [touch_binary, checking_file]
+        }, None, None, None)
+        assert repository.incoming() is False
+        assert checking_file in os.listdir(repository_root)
+
+
+@system_binary('echo')
+def test_mirroring_custom_incoming_changes(echo_binary):
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'incoming': [echo_binary, 'new incoming changes!']
+        }, None, None, None)
+        assert repository.incoming() is True
+
+
+@system_binary('true')
+def test_mirroring_custom_incoming_no_changes(true_binary):
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'incoming': true_binary
+        }, None, None, None)
+        assert repository.incoming() is False
+
+
+@system_binary('false')
+def test_mirroring_custom_incoming_error(false_binary):
+    with pytest.raises(RepositoryException):
+        with tempfile.TemporaryDirectory() as repository_root:
+            repository = GitRepository(mock(), repository_root, 'test-1', {
+                'incoming': false_binary
+            }, None, None, None)
+            repository.incoming()
+
+
+def test_mirroring_incoming_invoke_original_command():
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1',
+                                   None, None, None, None)
+        with when(repository).incoming_check().thenReturn(0):
+            repository.incoming()
+            verify(repository).incoming_check()
+
+
+@system_binary('touch')
+def test_mirroring_custom_sync_invoke_command(touch_binary):
+    checking_file = 'sync.txt'
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'sync': [touch_binary, checking_file]
+        }, None, None, None)
+        assert repository.sync() == 0
+        assert checking_file in os.listdir(repository_root)
+
+
+@system_binary('true')
+def test_mirroring_custom_sync_success(true_binary):
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'sync': true_binary
+        }, None, None, None)
+        assert 0 == repository.sync()
+
+
+@system_binary('false')
+def test_mirroring_custom_sync_error(false_binary):
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1', {
+            'sync': false_binary
+        }, None, None, None)
+        assert 1 == repository.sync()
+
+
+def test_mirroring_sync_invoke_original_command():
+    with tempfile.TemporaryDirectory() as repository_root:
+        repository = GitRepository(mock(), repository_root, 'test-1',
+                                   None, None, None, None)
+        with when(repository).reposync().thenReturn(0):
+            repository.sync()
+            verify(repository).reposync()

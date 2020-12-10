@@ -19,7 +19,7 @@
 
 /*
  * Copyright (c) 2007, 2019, Oracle and/or its affiliates. All rights reserved.
- * Portions Copyright (c) 2018-2019, Chris Fraire <cfraire@me.com>.
+ * Portions Copyright (c) 2018, 2019, Chris Fraire <cfraire@me.com>.
  */
 package org.opengrok.web;
 
@@ -57,7 +57,7 @@ public final class WebappListener
     private static final Logger LOGGER = LoggerFactory.getLogger(WebappListener.class);
     private Timer startupTimer = Timer.builder("webapp.startup.latency").
                 description("web application startup latency").
-                register(Metrics.getRegistry());
+                register(Metrics.getPrometheusRegistry());
 
     /**
      * {@inheritDoc}

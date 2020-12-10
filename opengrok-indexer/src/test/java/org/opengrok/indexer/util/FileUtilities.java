@@ -19,7 +19,7 @@
 
 /*
  * Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
- * Portions Copyright (c) 2019-2020, Chris Fraire <cfraire@me.com>.
+ * Portions Copyright (c) 2019, 2020, Chris Fraire <cfraire@me.com>.
  */
 package org.opengrok.indexer.util;
 
@@ -40,7 +40,7 @@ import org.opengrok.indexer.configuration.RuntimeEnvironment;
 import static org.junit.Assert.assertNotNull;
 
 /**
- * Various filesystem utilities used by the different test setups
+ * Various filesystem utilities used by the different test setups.
  *
  * @author Trond Norbye
  */

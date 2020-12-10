@@ -19,7 +19,7 @@
 
 /*
  * Copyright (c) 2007, 2020, Oracle and/or its affiliates. All rights reserved.
- * Portions Copyright (c) 2017-2020, Chris Fraire <cfraire@me.com>.
+ * Portions Copyright (c) 2017, 2020, Chris Fraire <cfraire@me.com>.
  * Portions Copyright (c) 2020, Aleksandr Kirillov <alexkirillovsamara@gmail.com>.
  */
 package org.opengrok.indexer.configuration;
@@ -299,7 +299,11 @@ public final class Configuration {
 
     private SuggesterConfig suggesterConfig = new SuggesterConfig();
 
+    private StatsdConfig statsdConfig = new StatsdConfig();
+
     private Set<String> disabledRepositories;
+
+    private Set<String> authenticationTokens; // for non-localhost API access
 
     /*
      * types of handling history for remote SCM repositories:
@@ -499,6 +503,7 @@ public final class Configuration {
         cmds = new HashMap<>();
         setAllowLeadingWildcard(true);
         setAllowedSymlinks(new HashSet<>());
+        setAuthenticationTokens(new HashSet<>());
         setAuthorizationWatchdogEnabled(false);
         //setBugPage("http://bugs.myserver.org/bugdatabase/view_bug.do?bug_id=");
         setBugPattern("\\b([12456789][0-9]{6})\\b");
@@ -1221,7 +1226,7 @@ public final class Configuration {
      * @return path to the file holding compiled path descriptions for the web application
      */
     public Path getDtagsEftarPath() {
-        return Paths.get(getDataRoot(), "index", EFTAR_DTAGS_NAME);
+        return Paths.get(getDataRoot(), EFTAR_DTAGS_NAME);
     }
 
     public String getCTagsExtraOptionsFile() {
@@ -1315,12 +1320,31 @@ public final class Configuration {
         this.suggesterConfig = config;
     }
 
+    public StatsdConfig getStatsdConfig() {
+        return statsdConfig;
+    }
+
+    public void setStatsdConfig(final StatsdConfig config) {
+        if (config == null) {
+            throw new IllegalArgumentException("Cannot set Statsd configuration to null");
+        }
+        this.statsdConfig = config;
+    }
+
     public Set<String> getDisabledRepositories() {
         return disabledRepositories;
     }
 
     public void setDisabledRepositories(Set<String> disabledRepositories) {
         this.disabledRepositories = disabledRepositories;
+    }
+
+    public Set<String> getAuthenticationTokens() {
+        return authenticationTokens;
+    }
+
+    public void setAuthenticationTokens(Set<String> tokens) {
+        this.authenticationTokens = tokens;
     }
 
     /**

@@ -19,7 +19,7 @@
 
 /*
  * Copyright (c) 2005, 2020, Oracle and/or its affiliates. All rights reserved.
- * Portions Copyright (c) 2017-2020, Chris Fraire <cfraire@me.com>.
+ * Portions Copyright (c) 2017, 2020, Chris Fraire <cfraire@me.com>.
  */
 package org.opengrok.indexer.history;
 
@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -36,13 +35,13 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadFactory;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -90,6 +89,11 @@ public final class HistoryGuru {
     private final Map<String, String> repositoryRoots = new ConcurrentHashMap<>();
 
     /**
+     * Interface to perform repository lookup for a given file path and HistoryGuru state.
+     */
+    private final RepositoryLookup repositoryLookup;
+
+    /**
      * Creates a new instance of HistoryGuru, and try to set the default source
      * control system.
      */
@@ -110,6 +114,7 @@ public final class HistoryGuru {
             }
         }
         historyCache = cache;
+        repositoryLookup = RepositoryLookup.cached();
     }
 
     /**
@@ -425,6 +430,10 @@ public final class HistoryGuru {
                     continue;
                 }
                 if (repository == null) {
+                    if (depth > env.getScanningDepth()) {
+                        // we reached our search max depth, skip looking through the children
+                        continue;
+                    }
                     // Not a repository, search its sub-dirs.
                     if (pathAccepter.accept(file)) {
                         File[] subFiles = file.listFiles();
@@ -433,7 +442,8 @@ public final class HistoryGuru {
                                     "Failed to get sub directories for ''{0}'', " +
                                     "check access permissions.",
                                     file.getAbsolutePath());
-                        } else if (depth <= env.getScanningDepth()) {
+                        } else {
+                            // Recursive call to scan next depth
                             repoList.addAll(addRepositories(subFiles,
                                     allowedNesting, depth + 1, isNested));
                         }
@@ -618,7 +628,7 @@ public final class HistoryGuru {
             LOGGER.log(Level.WARNING,
                     "Failed optimizing the history cache database", he);
         }
-        elapsed.report(LOGGER, "Done historycache for all repositories");
+        elapsed.report(LOGGER, "Done history cache for all repositories", "indexer.history.cache");
         historyCache.setHistoryIndexDone();
     }
 
@@ -728,38 +738,8 @@ public final class HistoryGuru {
         return repos;
     }
 
-    protected Repository getRepository(File path) {
-        File file = path;
-        Set<String> rootKeys = repositoryRoots.keySet();
-
-        while (file != null) {
-            String nextPath = file.getPath();
-            for (String rootKey : rootKeys) {
-                String rel;
-                try {
-                    rel = PathUtils.getRelativeToCanonical(nextPath, rootKey);
-                } catch (IOException e) {
-                    LOGGER.log(Level.WARNING,
-                        "Failed to get relative to canonical for " + nextPath,
-                        e);
-                    return null;
-                }
-                Repository repo;
-                if (rel.equals(nextPath)) {
-                    repo = repositories.get(nextPath);
-                } else {
-                    String inRootPath = Paths.get(rootKey, rel).toString();
-                    repo = repositories.get(inRootPath);
-                }
-                if (repo != null) {
-                    return repo;
-                }
-            }
-
-            file = file.getParentFile();
-        }
-
-        return null;
+    protected Repository getRepository(File file) {
+        return repositoryLookup.getRepository(file.toPath(), repositoryRoots.keySet(), repositories, PathUtils::getRelativeToCanonical);
     }
 
     /**
@@ -769,10 +749,9 @@ public final class HistoryGuru {
      * @param repos repository paths
      */
     public void removeRepositories(Collection<String> repos) {
-        for (String repo : repos) {
-            repositories.remove(repo);
-        }
-
+        Set<Repository> removedRepos = repos.stream().map(repositories::remove)
+            .filter(Objects::nonNull).collect(Collectors.toSet());
+        repositoryLookup.repositoriesRemoved(removedRepos);
         // Re-map the repository roots.
         repositoryRoots.clear();
         List<Repository> ccopy = new ArrayList<>(repositories.values());
@@ -820,8 +799,7 @@ public final class HistoryGuru {
      */
     public void invalidateRepositories(Collection<? extends RepositoryInfo> repos, CommandTimeoutType cmdType) {
         if (repos == null || repos.isEmpty()) {
-            repositoryRoots.clear();
-            repositories.clear();
+            clear();
             return;
         }
 
@@ -837,16 +815,12 @@ public final class HistoryGuru {
          * run in parallel to speed up the process.
          */
         final CountDownLatch latch = new CountDownLatch(repos.size());
-        final ExecutorService executor = Executors.newFixedThreadPool(
-            Runtime.getRuntime().availableProcessors(),
-            new ThreadFactory() {
-                @Override
-                public Thread newThread(Runnable runnable) {
+        final ExecutorService executor = Executors.newFixedThreadPool(env.getIndexingParallelism(),
+                runnable -> {
                     Thread thread = Executors.defaultThreadFactory().newThread(runnable);
                     thread.setName("invalidate-repos-" + thread.getId());
                     return thread;
-                }
-        });
+                });
 
         for (RepositoryInfo rinfo : repos) {
             executor.submit(new Runnable() {
@@ -880,11 +854,17 @@ public final class HistoryGuru {
         }
         executor.shutdown();
 
-        repositoryRoots.clear();
-        repositories.clear();
+        clear();
         newrepos.forEach((_key, repo) -> putRepository(repo));
 
-        elapsed.report(LOGGER, String.format("done invalidating %d repositories", newrepos.size()));
+        elapsed.report(LOGGER, String.format("done invalidating %d repositories", newrepos.size()),
+                "history.repositories.invalidate");
+    }
+
+    private void clear() {
+        repositoryRoots.clear();
+        repositories.clear();
+        repositoryLookup.clear();
     }
 
     /**

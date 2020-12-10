@@ -18,9 +18,8 @@
  */
 
 /*
- * Copyright (c) 2018-2020, Chris Fraire <cfraire@me.com>.
+ * Copyright (c) 2018, 2020, Chris Fraire <cfraire@me.com>.
  */
-
 package org.opengrok.indexer.configuration;
 
 import java.lang.annotation.Annotation;
@@ -183,6 +182,8 @@ public class ConfigurationHelp {
             return null;
         } else if (paramType == SuggesterConfig.class) {
             return SuggesterConfig.getForHelp();
+        } else if (paramType == StatsdConfig.class) {
+            return StatsdConfig.getForHelp();
         } else {
             throw new UnsupportedOperationException("getSampleValue() for " +
                 paramType + ", " + genType);

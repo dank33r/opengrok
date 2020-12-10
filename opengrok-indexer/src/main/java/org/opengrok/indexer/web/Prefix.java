@@ -18,7 +18,7 @@
  */
 
 /*
- * Copyright (c) 2011 Jens Elkner.
+ * Copyright (c) 2011, Jens Elkner.
  * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
  * Portions Copyright (c) 2020, Chris Fraire <cfraire@me.com>.
  */
@@ -81,7 +81,9 @@ public enum Prefix {
     /** CSS and images. */
     STATIC("/default"),
     /** JavaScript. */
-    JS("/js");
+    JS("/js"),
+    /** JavaScript in Web JARs. */
+    WEBJARS("/webjars");
 
     private final String prefix;
     Prefix(String prefix) {

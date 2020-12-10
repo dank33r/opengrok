@@ -21,15 +21,17 @@
 
 #
 # Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
+# Portions Copyright (c) 2020, Krystof Tulinger <k.tulinger@seznam.cz>
 #
 
 import os
+import platform
 import tempfile
 import time
-import platform
 
 import pytest
 
+from conftest import posix_only, system_binary
 from opengrok_tools.utils.command import Command
 
 
@@ -74,14 +76,14 @@ def test_execute_nonexistent():
     assert cmd.getstate() == Command.ERRORED
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_getoutput():
     cmd = Command(['/bin/ls', '/etc/passwd'])
     cmd.execute()
     assert cmd.getoutput() == ['/etc/passwd\n']
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_work_dir():
     os.chdir("/")
     orig_cwd = os.getcwd()
@@ -92,29 +94,15 @@ def test_work_dir():
     assert os.getcwd() == orig_cwd
 
 
-@pytest.mark.skipif(not os.path.exists('/usr/bin/env'),
-                    reason="requires posix")
-def test_env():
-    cmd = Command(['/usr/bin/env'],
-                  env_vars={'FOO': 'BAR', 'A': 'B'})
+@system_binary('env')
+def test_env(env_binary):
+    cmd = Command([env_binary], env_vars={'FOO': 'BAR', 'A': 'B'})
     cmd.execute()
     assert "FOO=BAR\n" in cmd.getoutput()
 
 
-@pytest.mark.parametrize(
-    ('true_binary', 'false_binary'), [
-        pytest.param('/bin/true', '/bin/false',
-                     marks=pytest.mark.skipif(
-                         not os.path.exists('/bin/true') or
-                         not os.path.exists('/bin/false'),
-                         reason="requires /bin binaries")),
-        pytest.param('/usr/bin/true', '/usr/bin/false',
-                     marks=pytest.mark.skipif(
-                         not os.path.exists('/usr/bin/true') or
-                         not os.path.exists('/usr/bin/false'),
-                         reason="requires /usr/bin binaries")),
-    ]
-)
+@system_binary('true')
+@system_binary('false')
 def test_retcode(true_binary, false_binary):
     cmd = Command([false_binary])
     cmd.execute()
@@ -132,11 +120,10 @@ def test_command_to_str():
     assert str(cmd) == "foo bar"
 
 
-@pytest.mark.skipif(not os.path.exists('/bin/sleep'),
-                    reason="requires /bin/sleep")
-def test_command_timeout():
+@system_binary('sleep')
+def test_command_timeout(sleep_binary):
     timeout = 30
-    cmd = Command(["/bin/sleep", str(timeout)], timeout=3)
+    cmd = Command([sleep_binary, str(timeout)], timeout=3)
     start_time = time.time()
     cmd.execute()
     # Check the process is no longer around.
@@ -149,17 +136,16 @@ def test_command_timeout():
     assert cmd.getretcode() is None
 
 
-@pytest.mark.skipif(not os.path.exists('/bin/sleep'),
-                    reason="requires /bin/sleep")
-def test_command_notimeout():
+@system_binary('sleep')
+def test_command_notimeout(sleep_binary):
     cmd_timeout = 30
-    cmd = Command(["/bin/sleep", "3"], timeout=cmd_timeout)
+    cmd = Command([sleep_binary, "3"], timeout=cmd_timeout)
     cmd.execute()
     assert cmd.getstate() == Command.FINISHED
     assert cmd.getretcode() == 0
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_stderr():
     cmd = Command(["/bin/cat", "/foo/bar", "/etc/passwd"],
                   redirect_stderr=False)
@@ -174,7 +160,7 @@ def test_stderr():
 
 
 # This test needs the "/bin/cat" command, therefore it is Unix only.
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_long_output():
     """
     Test that output thread in the Command class captures all of the output.
@@ -202,7 +188,7 @@ def test_long_output():
         assert len("".join(cmd.getoutput())) == num_bytes
 
 
-@pytest.mark.skipif(not os.name.startswith("posix"), reason="requires posix")
+@posix_only
 def test_resource_limits():
     """
     Simple smoke test for setting resource limits.

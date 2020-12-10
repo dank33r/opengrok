@@ -18,7 +18,7 @@
  */
 
 /*
- * Copyright (c) 2016, 2020 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  */
 package opengrok.auth.plugin;
 
@@ -110,8 +110,8 @@ public class LdapAttrPlugin extends AbstractLdapPlugin {
             throw new IllegalArgumentException(String.format("Unable to read the file \"%s\"", filePath), e);
         }
 
-        LOGGER.log(Level.FINE, "LdapAttrPlugin plugin loaded with attr={0}, whitelist={1}, instance={2}",
-                new Object[]{ldapAttr, filePath, ldapUserInstance});
+        LOGGER.log(Level.FINE, "LdapAttrPlugin plugin loaded with attr={0}, whitelist={1} ({2} entries), " +
+                        "instance={3}", new Object[]{ldapAttr, filePath, whitelist.size(), ldapUserInstance});
     }
 
     @Override

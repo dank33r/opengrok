@@ -2,9 +2,11 @@ HIFORMAT: 1A
 
 # OpenGrok
 
-OpenGrok RESTful API documentation. The following endpoints are accessible under `/api/v1`
+OpenGrok RESTful API documentation. The following endpoints are accessible under `/api/v1` with the exception of `/metrics`.
 
-Besides `/suggester`, `/search` and `/metrics` endpoints, everything is accessible from `localhost` only.
+Besides `/suggester`, `/search` and `/metrics` endpoints, everything is accessible from `localhost` only
+unless authentication bearer tokens are configured in the web application and used via the 'Authorization' HTTP header
+(within HTTPS connection).
 
 ## Annotation [/annotation{?path}]
 
@@ -255,11 +257,20 @@ see https://docs.oracle.com/javase/8/docs/api/java/time/Duration.html#parse-java
 
 ### updates path descriptions for web application [POST]
 
-+ Request (text/plain)
+This will refresh the path descriptions. The web application will store
+the descriptions in a file under data root so it is not necessary to load the path
+descriptions manually after each web application redeploy.
+
+The paths are relative to source root, starting with /.
+
++ Request (application/json)
   + Body
 
-            /foo    bar
-            /foo/foo    bar bar
+            [
+                {"path": "/foo", "description": "foo foo"},
+                {"path": "/bar", "description": "bar"}
+            ]
+
 
 + Response 204
 
@@ -274,7 +285,7 @@ web application redeploy).
 
 + Response 200 (application/json)
   + Body
-  
+
             ["foo","bar"]
 
 ### add project [POST]

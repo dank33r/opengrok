@@ -17,10 +17,10 @@
  * CDDL HEADER END
  */
 
- /*
-  * Copyright (c) 2006, 2020, Oracle and/or its affiliates. All rights reserved.
-  * Portions Copyright (c) 2017-2020, Chris Fraire <cfraire@me.com>.
-  */
+/*
+ * Copyright (c) 2006, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Portions Copyright (c) 2017, 2020, Chris Fraire <cfraire@me.com>.
+ */
 package org.opengrok.indexer.configuration;
 
 import static org.opengrok.indexer.configuration.Configuration.makeXMLStringAsConfiguration;
@@ -29,6 +29,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -40,6 +41,7 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -123,6 +125,14 @@ public final class RuntimeEnvironment {
 
     public WatchDogService watchDog;
 
+    private final Set<ConfigurationChangedListener> listeners = new CopyOnWriteArraySet<>();
+
+    public List<String> getSubFiles() {
+        return subFiles;
+    }
+
+    private List<String> subFiles = new ArrayList<>();
+
     /**
      * Creates a new instance of RuntimeEnvironment. Private to ensure a
      * singleton anti-pattern.
@@ -140,6 +150,16 @@ public final class RuntimeEnvironment {
     // Instance of authorization framework and its lock.
     private AuthorizationFramework authFramework;
     private final Object authFrameworkLock = new Object();
+
+    private boolean indexer;
+
+    public boolean isIndexer() {
+        return indexer;
+    }
+
+    public void setIndexer(boolean indexer) {
+        this.indexer = indexer;
+    }
 
     /** Gets the thread pool used for multi-project searches. */
     public ExecutorService getSearchExecutor() {
@@ -391,8 +411,8 @@ public final class RuntimeEnvironment {
             throw new FileNotFoundException("sourceRoot is not defined");
         }
 
-        String maybeRelPath = PathUtils.getRelativeToCanonical(file.getPath(),
-                sourceRoot, getAllowedSymlinks(), getCanonicalRoots());
+        String maybeRelPath = PathUtils.getRelativeToCanonical(file.toPath(),
+                Paths.get(sourceRoot), getAllowedSymlinks(), getCanonicalRoots());
         File maybeRelFile = new File(maybeRelPath);
         if (!maybeRelFile.isAbsolute()) {
             /*
@@ -1598,6 +1618,8 @@ public final class RuntimeEnvironment {
      * Re-apply the configuration.
      * @param reindex is the message result of reindex
      * @param cmdType command timeout type
+     * @see #applyConfig(org.opengrok.indexer.configuration.Configuration,
+     * boolean, CommandTimeoutType) applyConfig(config, reindex, cmdType)
      */
     public void applyConfig(boolean reindex, CommandTimeoutType cmdType) {
         applyConfig(configuration, reindex, cmdType);
@@ -1631,6 +1653,9 @@ public final class RuntimeEnvironment {
      * have come from the Indexer (in which case some extra work is needed) or
      * is it just a request to set new configuration in place.
      *
+     * The classes that have registered their listener will be pinged here.
+     * @see ConfigurationChangedListener
+     *
      * @param config the incoming configuration
      * @param reindex is the message result of reindex
      * @param cmdType command timeout type
@@ -1662,6 +1687,10 @@ public final class RuntimeEnvironment {
         getAuthorizationFramework().reload();
 
         messagesContainer.setMessageLimit(getMessageLimit());
+
+        for (ConfigurationChangedListener l : listeners) {
+            l.onConfigurationChanged();
+        }
     }
 
     public void setIndexTimestamp() throws IOException {
@@ -1876,6 +1905,14 @@ public final class RuntimeEnvironment {
         syncWriteConfiguration(suggesterConfig, Configuration::setSuggesterConfig);
     }
 
+    public StatsdConfig getStatsdConfig() {
+        return syncReadConfiguration(Configuration::getStatsdConfig);
+    }
+
+    public void setStatsdConfig(StatsdConfig statsdConfig) {
+        syncWriteConfiguration(statsdConfig, Configuration::setStatsdConfig);
+    }
+
     /**
      * Applies the specified function to the runtime configuration, after having
      * obtained the configuration read-lock (and releasing afterward).
@@ -1909,5 +1946,17 @@ public final class RuntimeEnvironment {
 
     private int getMessageLimit() {
         return syncReadConfiguration(Configuration::getMessageLimit);
+    }
+
+    public Set<String> getAuthenticationTokens() {
+        return Collections.unmodifiableSet(syncReadConfiguration(Configuration::getAuthenticationTokens));
+    }
+
+    public void setAuthenticationTokens(Set<String> tokens) {
+        syncWriteConfiguration(tokens, Configuration::setAuthenticationTokens);
+    }
+
+    public void registerListener(ConfigurationChangedListener listener) {
+        listeners.add(listener);
     }
 }

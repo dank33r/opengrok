@@ -1,25 +1,44 @@
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * See LICENSE.txt included in this distribution for the specific
+ * language governing permissions and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at LICENSE.txt.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+
+/*
+ * Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
+ */
 package opengrok.auth.plugin.ldap;
 
 import opengrok.auth.plugin.configuration.Configuration;
-import opengrok.auth.plugin.ldap.LdapFacade;
-import opengrok.auth.plugin.ldap.LdapServer;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import javax.naming.directory.SearchControls;
-import javax.naming.ldap.LdapContext;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 public class LdapFacadeTest {
     @Test
@@ -37,11 +56,15 @@ public class LdapFacadeTest {
     }
 
     private LdapServer getSpyLdapServer(String name) throws UnknownHostException {
-        LdapServer server1 = new LdapServer(name);
-        LdapServer serverSpy1 = Mockito.spy(server1);
-        Mockito.when(serverSpy1.getAddresses(any())).thenReturn(new InetAddress[]{InetAddress.getLocalHost()});
-        Mockito.when(serverSpy1.isWorking()).thenReturn(true);
-        return serverSpy1;
+        return getSpyLdapServer(name, true);
+    }
+
+    private LdapServer getSpyLdapServer(String name, boolean working) throws UnknownHostException {
+        LdapServer server = new LdapServer(name);
+        LdapServer serverSpy = Mockito.spy(server);
+        Mockito.when(serverSpy.getAddresses(any())).thenReturn(new InetAddress[]{InetAddress.getLocalHost()});
+        Mockito.when(serverSpy.isWorking()).thenReturn(working);
+        return serverSpy;
     }
 
     @Test
@@ -99,19 +122,31 @@ public class LdapFacadeTest {
     @Test
     public void testPrepareServersNegative() throws UnknownHostException {
         Configuration config = new Configuration();
-
-        LdapServer server1 = new LdapServer("ldap://foo.com");
-        LdapServer serverSpy1 = Mockito.spy(server1);
-        Mockito.when(serverSpy1.getAddresses(any())).thenReturn(new InetAddress[]{InetAddress.getLocalHost()});
-        Mockito.when(serverSpy1.isReachable()).thenReturn(false);
-
-        LdapServer server2 = new LdapServer("ldap://bar.com");
-        LdapServer serverSpy2 = Mockito.spy(server2);
-        Mockito.when(serverSpy2.getAddresses(any())).thenReturn(new InetAddress[]{});
-
-        config.setServers(Arrays.asList(serverSpy1, serverSpy2));
+        config.setServers(Arrays.asList(getSpyLdapServer("ldap://foo.com", false),
+                getSpyLdapServer("ldap://bar.com", true)));
         LdapFacade facade = new LdapFacade(config);
-        facade.prepareServers();
         assertFalse(facade.isConfigured());
+    }
+
+    @Test
+    public void testGetSearchDescription() {
+        assertEquals("DN: foo, filter: bar, attributes: Bilbo,Frodo",
+                LdapFacade.getSearchDescription("foo", "bar", new String[]{"Bilbo", "Frodo"}));
+        assertEquals("DN: foo, filter: bar",
+                LdapFacade.getSearchDescription("foo", "bar", null));
+    }
+
+    @Test
+    public void testPrepareServersCloseUnused() throws UnknownHostException {
+        Configuration config = new Configuration();
+
+        LdapServer server1 = getSpyLdapServer("ldap://foo.com");
+        LdapServer server2 = getSpyLdapServer("ldap://bar.com");
+        LdapServer[] servers = {server1, server2};
+        config.setServers(Arrays.asList(servers));
+
+        LdapFacade facade = new LdapFacade(config);
+        verify(server1, times(0)).close();
+        verify(server2).close();
     }
 }

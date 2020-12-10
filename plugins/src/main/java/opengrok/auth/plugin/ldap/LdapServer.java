@@ -226,11 +226,11 @@ public class LdapServer implements Serializable {
      * @return true if it is working
      */
     public synchronized boolean isWorking() {
-        if (!isReachable()) {
-            return false;
-        }
-
         if (ctx == null) {
+            if (!isReachable()) {
+                return false;
+            }
+
             ctx = connect();
         }
         return ctx != null;
@@ -268,7 +268,6 @@ public class LdapServer implements Serializable {
 
             try {
                 ctx = new InitialLdapContext(env, null);
-                ctx.reconnect(null);
                 ctx.setRequestControls(null);
                 LOGGER.log(Level.INFO, "Connected to LDAP server {0}", this.toString());
                 errorTimestamp = 0;

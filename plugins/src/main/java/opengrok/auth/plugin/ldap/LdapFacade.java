@@ -197,11 +197,25 @@ public class LdapFacade extends AbstractLdapProvider {
      * Go through all servers in the pool and record the first working.
      */
     void prepareServers() {
+        LOGGER.log(Level.FINER, "checking servers for {0}", this);
         for (int i = 0; i < servers.size(); i++) {
             LdapServer server = servers.get(i);
             if (server.isWorking() && actualServer == -1) {
                 actualServer = i;
             }
+        }
+
+        // Close the connections to the inactive servers.
+        LOGGER.log(Level.FINER, "closing unused servers");
+        for (int i = 0; i < servers.size(); i++) {
+            if (i != actualServer) {
+                servers.get(i).close();
+            }
+        }
+
+        if (LOGGER.isLoggable(Level.FINER)) {
+            LOGGER.log(Level.FINER, String.format("server check done (current server: %s)",
+                    actualServer != -1 ? servers.get(actualServer) : "N/A"));
         }
     }
 
@@ -307,8 +321,18 @@ public class LdapFacade extends AbstractLdapProvider {
         return res;
     }
 
-    private String getSearchDescription(String dn, String filter, String[] attributes) {
-        return "DN: " + dn + " , filter: " + filter + " , attributes: " + String.join(",", attributes);
+    // available for testing
+    static String getSearchDescription(String dn, String filter, String[] attributes) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("DN: ");
+        builder.append(dn);
+        builder.append(", filter: ");
+        builder.append(filter);
+        if (attributes != null) {
+            builder.append(", attributes: ");
+            builder.append(String.join(",", attributes));
+        }
+        return builder.toString();
     }
 
     /**
